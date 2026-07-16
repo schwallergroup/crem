@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import List
 
 from rdkit import Chem, RDLogger
-from rdkit.Chem import rdMMPA
+from rdkit.Chem import rdMMPA, BRICS
 from tqdm import tqdm
 
 from crem.mol_context import get_std_context_core_permutations
@@ -34,7 +34,7 @@ from crem.ring_fragments import iter_partial_ring_fragments
 
 
 _SQLITE_BATCH = 32000
-_FRAG_MODES = ("acyclic", "ring", "both", "ring_optimal", "both_optimal")
+_FRAG_MODES = ("acyclic", "ring", "both", "ring_optimal", "both_optimal", "brics")
 
 # Magic value written into PRAGMA application_id at the end of a stride-mode
 # shard build. The parallel-shards orchestrator reads this to decide which
@@ -492,6 +492,44 @@ def _fragment_mol_acyclic(mol, smi_id, mode, min_heavy_atoms=None, max_heavy_ato
     return outlines, n_failures
 
 
+def _fragment_mol_brics(mol, smi_id, min_heavy_atoms=None, max_heavy_atoms=None):
+    """BRICS-bond fragmentation: cut only bonds matching BRICS retrosynthetic
+    rules. Reuses rdMMPA to emit the same (core, chains) format as the acyclic
+    fragmenter, so downstream env/core handling is unchanged.
+
+    Returns ``(outlines_set, n_failures)``.
+    """
+    outlines = set()
+    bond_ids = [mol.GetBondBetweenAtoms(a1, a2).GetIdx()
+                for (a1, a2), _ in BRICS.FindBRICSBonds(mol)]
+    if not bond_ids:
+        return outlines, 0
+
+    frags, n_failures = _safe_mmpa_fragment(
+        mol, smi_id,
+        bondsToCut=bond_ids,
+        minCuts=1,
+        maxCuts=4,
+        resultsAsMols=False,
+    )
+
+    for core, chains in set(frags):
+        if core:
+            if _core_size_allowed(core, min_heavy_atoms, max_heavy_atoms):
+                outlines.add((core, chains))
+        else:  # single cut
+            residues = chains.split('.')
+            if len(residues) != 2:
+                continue
+            for context_, core_ in permutations(residues, 2):
+                if context_ == '[H][*:1]':
+                    continue
+                if _core_size_allowed(core_, min_heavy_atoms, max_heavy_atoms):
+                    outlines.add((core_, context_))
+
+    return outlines, n_failures
+
+
 def _fragment_mol_ring(mol, smi_id, min_heavy_atoms=None, max_heavy_atoms=None, side_cut_mode="all"):
     """Ring-bond fragmentation: cut every pair of SINGLE bonds that lies
     inside the same ring, yielding 2-AP arc fragments and 3/4-AP partial-cycle
@@ -546,6 +584,16 @@ def _fragment_mol(smi, smi_id, mode, frag_mode, min_heavy_atoms=None, max_heavy_
             Chem.Mol(mol),
             smi_id,
             mode,
+            min_heavy_atoms=min_heavy_atoms,
+            max_heavy_atoms=max_heavy_atoms,
+        )
+        n_failures += f
+        for core, chains in outlines:
+            out.add((core, chains, 0))  # 0 - not ring closure
+    if frag_mode == 'brics':
+        outlines, f = _fragment_mol_brics(
+            Chem.Mol(mol),
+            smi_id,
             min_heavy_atoms=min_heavy_atoms,
             max_heavy_atoms=max_heavy_atoms,
         )
@@ -1036,7 +1084,8 @@ def run(
             acyclic bonds), 'ring' (cuts of pairs of SINGLE bonds inside the
             same ring plus 0-2 acyclic side cuts), 'ring_optimal' (same ring
             cuts, but side cuts only on exo acyclic bonds adjacent to the
-            selected ring arc), 'both', or 'both_optimal'.
+            selected ring arc), 'both', 'both_optimal', or 'brics' (cuts only
+            BRICS retrosynthetic bonds).
         stride_mod: When > 1, only process chunks whose ``chunk_id %
             stride_mod == stride_idx``. Used by ``run_parallel_shards`` to
             split the input across N concurrent shard builders.
@@ -1644,7 +1693,8 @@ def main():
             "the same ring plus 0-2 acyclic side cuts); 'ring_optimal' "
             "(same ring cuts but only exo acyclic side cuts adjacent to the "
             "selected ring arc); 'both' includes acyclic plus full ring; "
-            "'both_optimal' includes acyclic plus ring_optimal "
+            "'both_optimal' includes acyclic plus ring_optimal; "
+            "'brics' cuts only BRICS retrosynthetic bonds "
             "(default: both_optimal)"
         ),
     )
