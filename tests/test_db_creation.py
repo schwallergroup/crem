@@ -371,3 +371,23 @@ def test_both_optimal_combines_acyclic_and_optimal_ring_fragments():
     assert {item[2] for item in both_optimal} == {0, 1}
     assert {item for item in both_optimal if item[2] == 1} == ring_optimal
     assert ring_optimal < ring_full
+
+
+def test_brics_cuts_only_brics_bonds():
+    # amide + benzyl-morpholine: BRICS cuts the amide and the two bonds
+    # around the CH2 linker; it must NOT cut the aromatic ring bonds.
+    smi = "O=C(Nc1ccccc1)c1ccc(CN2CCOCC2)cc1"
+    brics, _ = _fragment_mol(smi, "", 1, "brics", max_heavy_atoms=20)
+    acyclic, _ = _fragment_mol(smi, "", 1, "acyclic", max_heavy_atoms=20)
+
+    assert brics                              # produces fragments
+    assert all(item[2] == 0 for item in brics)  # tagged as non-ring-closure
+    for core, chains, _ in brics:             # every emitted core is valid
+        assert Chem.MolFromSmiles(core) is not None
+    # BRICS only cuts bonds that acyclic MMPA also cuts (a subset)
+    assert {(c, ch) for c, ch, _ in brics} <= {(c, ch) for c, ch, _ in acyclic}
+
+    # pentane has no BRICS bonds but plenty of acyclic single bonds -> BRICS
+    # is strictly more restrictive than plain acyclic fragmentation.
+    assert _fragment_mol("CCCCC", "", 1, "brics", max_heavy_atoms=20)[0] == set()
+    assert _fragment_mol("CCCCC", "", 1, "acyclic", max_heavy_atoms=20)[0]

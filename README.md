@@ -97,7 +97,9 @@ cremdb_create -i input.smi -o fragments.db -s chembl
 ```
 
 This produces the current database format with fragment-set support and
-ring-closure fragments. For multiple sets, property columns, sharded/parallel
+ring-closure fragments. By default bonds are cut with the MMPA scheme; pass
+`--frag-mode brics` to instead cut only BRICS retrosynthetic bonds. For
+multiple sets, property columns, sharded/parallel
 builds, conversion of older databases, and the programmatic `crem.db` API, see
 [Fragment databases](https://crem.readthedocs.io/en/latest/fragment-databases/build-v1/).
 
