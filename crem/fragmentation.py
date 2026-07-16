@@ -5,10 +5,10 @@ import sys
 from functools import partial
 from multiprocessing import Pool, cpu_count
 from rdkit import Chem
-from rdkit.Chem import rdMMPA
+from rdkit.Chem import rdMMPA, BRICS
 
 
-def fragment_mol(smi, smi_id='', mode=0, sep_out=','):
+def fragment_mol(smi, smi_id='', mode=0, sep_out=',', method='mmpa'):
 
     mol = Chem.MolFromSmiles(smi)
 
@@ -16,6 +16,14 @@ def fragment_mol(smi, smi_id='', mode=0, sep_out=','):
 
     if mol is None:
         sys.stderr.write("Can't generate mol for: %s\n" % smi)
+    elif method == 'brics':
+        # cut only bonds matching BRICS rules; same core/chains output as MMPA
+        bond_ids = [mol.GetBondBetweenAtoms(a1, a2).GetIdx()
+                    for (a1, a2), _ in BRICS.FindBRICSBonds(mol)]
+        if bond_ids:
+            frags = rdMMPA.FragmentMol(mol, bondsToCut=bond_ids, minCuts=1, maxCuts=4, resultsAsMols=False)
+            for core, chains in set(frags):
+                outlines.add(sep_out.join((smi, smi_id, core, chains)) + '\n')
     else:
         # heavy atoms
         if mode == 0 or mode == 1:
@@ -38,18 +46,18 @@ def fragment_mol(smi, smi_id='', mode=0, sep_out=','):
     return outlines
 
 
-def process_line(line, sep, mode, sep_out):
+def process_line(line, sep, mode, sep_out, method='mmpa'):
     tmp = line.strip().split(sep)
     if tmp:
         if len(tmp) == 1:
-            return fragment_mol(tmp[0], mode=mode, sep_out=sep_out)
+            return fragment_mol(tmp[0], mode=mode, sep_out=sep_out, method=method)
         else:
-            return fragment_mol(tmp[0], tmp[1], mode=mode, sep_out=sep_out)
+            return fragment_mol(tmp[0], tmp[1], mode=mode, sep_out=sep_out, method=method)
     else:
         return None
 
 
-def main(input_fname, output_fname, mode, sep, ncpu, sep_out, verbose):
+def main(input_fname, output_fname, mode, sep, ncpu, sep_out, verbose, method='mmpa'):
 
     ncpu = min(cpu_count(), max(ncpu, 1))
     p = Pool(ncpu)
@@ -58,7 +66,7 @@ def main(input_fname, output_fname, mode, sep, ncpu, sep_out, verbose):
 
         with open(input_fname) as f:
 
-            for i, res in enumerate(p.imap_unordered(partial(process_line, sep=sep, mode=mode, sep_out=sep_out), f, chunksize=100), 1):
+            for i, res in enumerate(p.imap_unordered(partial(process_line, sep=sep, mode=mode, sep_out=sep_out, method=method), f, chunksize=100), 1):
 
                 if res:
                     out.write(''.join(res))
@@ -82,7 +90,11 @@ def entry_point():
                         help='separator in the output file. Default: comma')
     parser.add_argument('-m', '--mode', metavar='INTEGER', required=False, default=0, choices=[0, 1, 2], type=int,
                         help='fragmentation mode: 0 - all atoms constitute a fragment, 1- heavy atoms only, '
-                             '2 - hydrogen atoms only. Default: 0.')
+                             '2 - hydrogen atoms only. Default: 0. Ignored when --method is brics.')
+    parser.add_argument('-f', '--method', metavar='STRING', required=False, default='mmpa',
+                        choices=['mmpa', 'brics'],
+                        help='fragmentation method: mmpa - cut all single bonds between heavy atoms, '
+                             'brics - cut only BRICS-retrosynthetic bonds. Default: mmpa.')
     parser.add_argument('-c', '--ncpu', metavar='NUMBER', required=False, default=1,
                         help='number of cpus used for computation. Default: 1.')
     parser.add_argument('-v', '--verbose', action='store_true', default=False,
@@ -97,6 +109,7 @@ def entry_point():
         if o == "sep": sep = v
         if o == "sep_out": sep_out = v
         if o == "mode": mode = v
+        if o == "method": method = v
 
     main(input_fname=input_fname,
          output_fname=output_fname,
@@ -104,7 +117,8 @@ def entry_point():
          mode=mode,
          ncpu=ncpu,
          sep_out=sep_out,
-         verbose=verbose)
+         verbose=verbose,
+         method=method)
 
 
 if __name__ == '__main__':
