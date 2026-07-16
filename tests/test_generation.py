@@ -53,6 +53,35 @@ def test_mutate_no_duplicates(db, mol_aniline):
     assert len(res) == len(set(res))
 
 
+def test_fragment_mol_brics_subset_of_mmpa():
+    # butylbenzene: the alkyl C-C bonds are not BRICS bonds, so BRICS cuts
+    # strictly fewer places than MMPA (which cuts every acyclic single bond).
+    frag = getattr(crem_module, "__fragment_mol")
+    mol = Chem.MolFromSmiles("CCCCc1ccccc1")
+    mmpa = {f[1] for f in frag(mol, radius=1, frag_method="mmpa")}
+    brics = {f[1] for f in frag(mol, radius=1, frag_method="brics")}
+    assert brics < mmpa
+
+
+def test_mutate_frag_method_brics_subset(db, mol_aniline):
+    # a brics query fragmentation only cuts a subset of bonds, so its results
+    # are a subset of the default mmpa query fragmentation against the same DB.
+    mmpa = set(mutate_mol(mol_aniline, db, radius=3, min_freq=0, max_size=8))
+    brics = set(mutate_mol(mol_aniline, db, radius=3, min_freq=0, max_size=8, frag_method="brics"))
+    assert brics <= mmpa
+    assert all(_valid(s) for s in brics)
+
+
+@pytest.mark.parametrize("ncores", [1, 2])
+def test_mutate_frag_method_brics_ncores_agree(db, mol_aniline, ncores):
+    # single-core and multi-core paths must produce identical results
+    res = set(mutate_mol(mol_aniline, db, radius=3, min_freq=0, max_size=8,
+                         frag_method="brics", ncores=ncores))
+    ref = set(mutate_mol(mol_aniline, db, radius=3, min_freq=0, max_size=8,
+                         frag_method="brics", ncores=1))
+    assert res == ref
+
+
 def test_mutate_source_not_in_output(db, mol_aniline):
     src = Chem.MolToSmiles(mol_aniline)
     res = list(mutate_mol(mol_aniline, db, radius=3, min_freq=0, max_size=8))
