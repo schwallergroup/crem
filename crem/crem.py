@@ -8,6 +8,7 @@ from collections import defaultdict
 from rdkit import Chem, rdBase
 from rdkit.Chem import rdmolops
 from rdkit.Chem import rdMMPA
+from rdkit.Chem import BRICS
 from crem.mol_context import get_canon_context_core
 from multiprocessing import Pool, cpu_count
 import sqlite3
@@ -147,7 +148,7 @@ def __has_ring(mol):
 
 
 def __fragment_mol(mol, radius=3, return_ids=True, keep_stereo=False, protected_ids=None, symmetry_fixes=False,
-                   min_core_atoms=None, max_core_atoms=None, include_cyclic_cores=False):
+                   min_core_atoms=None, max_core_atoms=None, include_cyclic_cores=False, frag_method='mmpa'):
     """
     INPUT:
         mol - Mol
@@ -188,11 +189,18 @@ def __fragment_mol(mol, radius=3, return_ids=True, keep_stereo=False, protected_
         for atom in mol.GetAtoms():
             atom.SetIntProp(ATOM_INDEX_PROP, atom.GetIdx())
 
-    # heavy atoms
-    frags = rdMMPA.FragmentMol(mol, pattern="[!#1]!@!=!#[!#1]", maxCuts=4, resultsAsMols=True, maxCutBonds=30)
-    frags += rdMMPA.FragmentMol(mol, pattern="[!#1]!@!=!#[!#1]", maxCuts=3, resultsAsMols=True, maxCutBonds=30)
-    # hydrogen atoms
-    frags += rdMMPA.FragmentMol(mol, pattern="[#1]!@!=!#[!#1]", maxCuts=1, resultsAsMols=True, maxCutBonds=100)
+    if frag_method == 'brics':
+        # cut only BRICS retrosynthetic bonds (heavy-atom bonds only, no H-splitting)
+        bond_ids = [mol.GetBondBetweenAtoms(a1, a2).GetIdx()
+                    for (a1, a2), _ in BRICS.FindBRICSBonds(mol)]
+        frags = rdMMPA.FragmentMol(mol, bondsToCut=bond_ids, minCuts=1, maxCuts=4,
+                                   resultsAsMols=True) if bond_ids else []
+    else:
+        # heavy atoms
+        frags = rdMMPA.FragmentMol(mol, pattern="[!#1]!@!=!#[!#1]", maxCuts=4, resultsAsMols=True, maxCutBonds=30)
+        frags += rdMMPA.FragmentMol(mol, pattern="[!#1]!@!=!#[!#1]", maxCuts=3, resultsAsMols=True, maxCutBonds=30)
+        # hydrogen atoms
+        frags += rdMMPA.FragmentMol(mol, pattern="[#1]!@!=!#[!#1]", maxCuts=1, resultsAsMols=True, maxCutBonds=100)
 
     def add_output(context_mol, core_mol):
         if Chem.MolToSmiles(context_mol) == '[H][*:1]':  # context cannot be H
@@ -907,7 +915,7 @@ def __gen_replacements(mol1, mol2, db_name, radius, dist=None, min_size=0, max_s
                        protected_ids_1=None, protected_ids_2=None, min_freq=10, set_names=None,
                        symmetry_fixes=False, filter_func=None, sample_func=None, return_frag_smi_only=False,
                        operation="mutate", ring_closures=False, ring_size=None,
-                       seed=None, **kwargs):
+                       frag_method='mmpa', seed=None, **kwargs):
 
     rng = random.Random(seed)
 
@@ -947,6 +955,7 @@ def __gen_replacements(mol1, mol2, db_name, radius, dist=None, min_size=0, max_s
                 min_core_atoms=lower_core_atoms,
                 max_core_atoms=upper_core_atoms,
                 include_cyclic_cores=(replace_cycle_mode == "forced"),
+                frag_method=frag_method,
             )
         ]
         if replace_cycle_mode in {"partial_all", "partial_exo"}:
@@ -1170,7 +1179,7 @@ def __get_data_cycle(mol, db_name, radius, ring_size, ring_closures, min_size, m
 def mutate_mol(mol, db_name, radius=3, min_size=0, max_size=10, min_rel_size=0, max_rel_size=1, min_inc=-2, max_inc=2,
                max_replacements=None, replace_cycles="no", replace_ids=None, protected_ids=None,
                symmetry_fixes=False, min_freq=0, return_rxn=False, return_rxn_freq=False, return_mol=False, ncores=1,
-               filter_func=None, sample_func=None, set_names=None, seed=None, **kwargs):
+               filter_func=None, sample_func=None, set_names=None, frag_method='mmpa', seed=None, **kwargs):
     """
     Generator of new molecules by replacement of fragments in the supplied molecule with fragments from DB.
 
@@ -1258,6 +1267,8 @@ def mutate_mol(mol, db_name, radius=3, min_size=0, max_size=10, min_rel_size=0, 
 
     Note: supply RDKit Mol object with explicit hydrogens if H replacement is required
 
+    Note: frag_method='brics' fragments the query by BRICS bonds only; use it to match a DB built with BRICS.
+
     """
 
     replace_cycles = _normalize_replace_cycles(replace_cycles)
@@ -1295,6 +1306,7 @@ def mutate_mol(mol, db_name, radius=3, min_size=0, max_size=10, min_rel_size=0, 
                                                                         sample_func=sample_func,
                                                                         return_frag_smi_only=False,
                                                                         operation="mutate",
+                                                                        frag_method=frag_method,
                                                                         seed=seed, **kwargs):
             for smi, m, rxn in __frag_replace(mol, None, frag_sma, core_sma, radius, context_mol):
                 if max_replacements is None or len(products) < (max_replacements + 1):  # +1 because we added source mol to output smiles
@@ -1320,6 +1332,7 @@ def mutate_mol(mol, db_name, radius=3, min_size=0, max_size=10, min_rel_size=0, 
                                                               protected_ids, min_freq, set_names, max_replacements,
                                                               symmetry_fixes, filter_func=filter_func,
                                                               sample_func=sample_func,
+                                                              frag_method=frag_method,
                                                               seed=seed, **kwargs),
                                 chunksize=100):
                 for smi, m, rxn, freq in items:
